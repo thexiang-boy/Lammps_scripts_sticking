@@ -1,0 +1,166 @@
+
+variable i loop 3
+variable num_S equal 0
+variable num_R equal 0
+variable num_C equal 0
+label loop
+###########################Initial settings###################################
+units metal
+dimension 3
+
+boundary p p f
+atom_style atomic
+neighbor 1.0 bin
+neigh_modify every 1 delay 0 check yes
+
+variable Tem equal 300 
+variable timeinterval equal 1000 # 5000
+variable relaxtime equal ${timeinterval}*1  # 1000 2ns
+variable tracktime equal ${timeinterval}*5  # 5 ps
+variable x_target equal 10
+variable y_target equal 10
+variable z_target equal 30
+variable z_box equal 46
+ 
+variable fix_length  equal 3
+variable heat_length equal 1.1
+variable x_middle equal ${x_target}-${heat_length}
+variable y_middle equal ${y_target}-${heat_length}
+variable z_middle equal ${fix_length}+${heat_length}
+
+lattice bcc 3.165 # default （001）
+
+region reg_box block                   0 ${x_target} 0 ${y_target} -10 ${z_box}
+region reg_target block                0 ${x_target} 0 ${y_target} 0 ${z_target}  
+region reg_fix block                   0 ${x_target} 0 ${y_target} 0 3 
+region reg_middle block                ${heat_length} ${x_middle} ${heat_length} ${y_middle} ${z_middle} ${z_target}
+region reg_projectile block            ${heat_length} ${x_middle} ${heat_length} ${y_middle} 45 45.1
+region reg_delupatoms block            0 ${x_target} 0 ${y_target}  45.2 46 
+region reg_deldownatoms block          0 ${x_target} 0 ${y_target} -10 -5
+
+create_box 2 reg_box
+create_atoms 1 region reg_target
+#read_restart  restart_file.1 restart_file.2
+
+group gro_W type 1
+group gro_D type 2 
+group gro_target region reg_target
+group gro_fix region reg_fix
+group gro_relax subtract gro_target gro_fix
+group gro_middle region reg_middle
+group gro_reyu subtract gro_target gro_fix gro_middle             #定义热浴：reyu---热浴,side=1.1a
+
+pair_style tersoff/zbl 
+#pair_style tersoff/zbl/mod                                                   
+pair_coeff * * WCH_Juslin.tersoff.zbl W H
+
+mass 1 183.84
+mass 2 2.0141
+
+timestep 0.0004
+thermo 1000
+thermo_style  custom step time temp pe ke etotal press atoms
+#################################### Relax run ############################################
+velocity gro_relax create ${Tem} 412345 dist gaussian
+velocity gro_fix set 0.0 0.0 0.0 units box
+fix 1 gro_fix setforce 0.0 0.0 0.0
+fix 2 gro_relax nvt temp ${Tem} ${Tem} 0.001 drag 0.2    
+
+min_style sd
+minimize 1.0-8 1.0e-8 10000 100000
+
+run   ${relaxtime}                                             
+unfix 2
+reset_timestep 0
+##################################### Output settings ######################################
+variable N_D equal 1                                    
+variable E equal pe                                                   #定义系统总势能
+variable N equal atoms                                                #定义系统总原子数
+variable T equal temp                                                 #定义系统温度，单位：K
+variable m equal 2.0141                                               #定义变量m为入射离子原子量
+variable Ep equal 80			#定义变量Ep为入射离子能量,单位eV
+variable v equal -(1E10/1E12)*sqrt((2*${Ep}*1.6E-19)/($m*1.66E-27))   #定义变量v为入射离子速度,单位(Ang/ps)
+variable t equal time*1E-12                                           #定义变量t为运行时间，单位s
+variable steps equal step
+variable temp_all equal temp
+variable area equal ${x_target}*${y_target}*10.017225*1.0E-20         #unit m^2
+variable flux equal ${N_D}/(${area}*${timeinterval}*0.0004*1.0E-12)                # flux = N/(area * time)
+variable Flux format flux %.2e
+ 
+dump 4 gro_D custom 100 ${Ep}eV_$i.lammpstrj id type x y z vx vy vz
+####################################### Loop  settings ########################################
+
+fix 4 gro_reyu temp/berendsen ${Tem} ${Tem} 0.001       
+fix 5 all nve
+fix 9 gro_target  evaporate 1 1  reg_delupatoms 42615
+fix 11 gro_target  evaporate 1 1  reg_deldownatoms 41688
+fix 12 all evaporate 1 1 reg_delupatoms 156461
+fix 13 all evaporate 1 1 reg_deldownatoms 156461
+
+####################################### Loop run ######################################
+#restart 1000 restart_file.1 restart_file.2
+
+variable random_seed equal 12345+$i*17
+create_atoms 2 random ${N_D} ${random_seed} reg_projectile
+#variable z_D equal z[$N]  # 记录子弹的z坐
+group gro_projectile region reg_projectile
+velocity gro_projectile set 0.0 0.0 $v units box 
+
+
+# 动态统计三个区域内的原子数
+
+region reg_stick block 0 ${x_target} 0 ${y_target} -1 31
+region reg_reflect block 0 ${x_target} 0 ${y_target} 31 46
+region reg_channel block 0 ${x_target} 0 ${y_target} -10 -1
+
+
+group  gro_stick dynamic gro_D region reg_stick 
+group  gro_reflect dynamic gro_D region reg_reflect
+group  gro_channel dynamic gro_D region reg_channel
+        
+variable   num_s equal count(gro_stick)
+variable   num_r equal count(gro_reflect)
+variable   num_c equal count(gro_channel)
+variable    num_S_temp equal  ${num_S} # 保存上一步循环的数值
+variable    num_R_temp equal  ${num_R}
+variable    num_C_temp equal  ${num_C}
+# if "${num_s} == 1 " then "${num_S} + 1 "
+# if "${num_r} == 1 " then "${num_R} + 1 "
+# if "${num_c} == 1 " then "${num_C} + 1 "
+# print "${i} ${Ep} ${num_s} ${num_r} ${num_c} " append stick.xlsx 
+
+compute 1 gro_D ke/atom
+compute 2 gro_D reduce sum c_1    # 计算单个入射粒子的能量，可换成计算氘原子的总能
+compute 3 gro_D property/atom z 
+thermo_style custom step time temp epair etotal press ke c_2 
+fix extra all print 100 "Coords of marker atom = c_3" file coord.$i.txt
+
+run ${tracktime}                                             # flux = N_D/(area*time)
+
+variable t equal time*1E-12                                           #定义变量t为运行时间，单位s
+variable t2 equal $t*1E+9                                            #定义变量t_2为运行时间，单位ns
+variable t_2 format t2 %.2e
+variable fluence equal  ${flux}*$t
+variable Fluence format fluence %.2e 
+print "@@@@@@@@@@@@ The program has been run $i loop @@@@@@@@@@@@@@@@@@@@@@@@@@"
+print "@@@@@@@@@@@@ The current Fluence is ${Fluence} m^(-2) @@@@@@@@@@@@@@@@@@@@@@ "
+print "@@@@@@@@@@@@ The current time is ${t_2} ns @@@@@@@@@@@@@@@@"
+print "@@@@@@@@@@@@ The current stick D is ${num_s}, the total number is ${num_S} @@@@@@@@@@@@@@@@"
+print "@@@@@@@@@@@@ The current stick D is ${num_r}, the total number is ${num_R}  @@@@@@@@@@@@@@@@"
+print "@@@@@@@@@@@@ The current stick D is ${num_c}, the total number is ${num_C}  @@@@@@@@@@@@@@@@"
+
+variable   num_s delete
+variable   num_r delete
+variable   num_c delete
+
+variable   num_S_temp delete
+variable   num_R_temp delete
+variable   num_C_temp delete
+clear
+next i
+jump in.stick.lmp loop
+
+
+###################################### Loop end#################################
+ 
+print "----------loop collision end and mission accomplished------------"
